@@ -1,0 +1,90 @@
+name: Monthly Translation Update
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'   # monthly: the 1st at 06:00 UTC, runs the translation
+    - cron: '0 6 * * 1'   # weekly (Monday): only touches the cache so GitHub doesn't evict it
+  workflow_dispatch:
+    inputs:
+      refresh:
+        description: 'Also rewrite the translations rows that already exist (--refresh)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: translation-update
+  cancel-in-progress: false
+
+jobs:
+  update-translations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    permissions:
+      contents: write
+    env:
+      # the weekly cron only keeps the cache alive, the real work runs monthly or by hand
+      WORK: ${{ github.event_name != 'schedule' || github.event.schedule == '0 6 1 * *' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Restore translation caches
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ignis-fr-tools/cache-*.json
+            ignis-fr-tools/fr-cardsrealm.json
+            ignis-fr-tools/fr-skipped.json
+          key: translation-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: translation-cache-
+
+      - name: Setup Node.js
+        if: env.WORK == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: ignis-fr-tools/package-lock.json
+
+      - name: Install dependencies
+        if: env.WORK == 'true'
+        working-directory: ignis-fr-tools
+        run: npm ci
+
+      - name: Clone CDB repositories
+        if: env.WORK == 'true'
+        run: |
+          mkdir -p cdbs
+          git clone --depth 1 https://github.com/ProjectIgnis/BabelCDB.git cdbs/BabelCDB
+          git clone --depth 1 https://github.com/ProjectIgnis/DeltaBagooska.git cdbs/DeltaBagooska
+
+      - name: Run translation script
+        if: env.WORK == 'true'
+        working-directory: ignis-fr-tools
+        run: npm run ${{ (github.event_name == 'workflow_dispatch' && inputs.refresh) && 'translate:refresh' || 'translate' }}
+
+      - name: Save translation caches
+        if: ${{ always() && env.WORK == 'true' }}
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ignis-fr-tools/cache-*.json
+            ignis-fr-tools/fr-cardsrealm.json
+            ignis-fr-tools/fr-skipped.json
+          key: translation-cache-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Commit and push the updated translations
+        if: env.WORK == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A -- "Français"
+          if git diff --cached --quiet; then
+            echo "No changes detected in the translations."
+          else
+            git commit -m "chore: automated update of translations [skip ci]"
+            git push
+            echo "Changes pushed successfully!"
+          fi
